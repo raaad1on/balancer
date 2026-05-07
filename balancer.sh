@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# Xray Balancer Analyzer (Aggressive Search Edition)
+# Xray Balancer Analyzer (Force Parsing Edition)
 # Usage: curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash
 # =================================================================
 
@@ -10,63 +10,56 @@ LOG_FILE="/var/log/supervisor/xray.out.log"
 
 echo -e "\e[34m[*] Инициализация проверки окружения...\e[0m"
 
-# 1. Проверка jq на хосте
+# 1. Зависимости (хост)
 if ! command -v jq &>/dev/null; then
-    echo -e "\e[33m[!] Установка jq...\e[0m"
     sudo apt update && sudo apt install -y jq &>/dev/null
 fi
 
-# 2. Проверка curl внутри контейнера
+# 2. Зависимости (контейнер)
 CHECK_CURL=$(sudo docker exec $CONTAINER_NAME command -v curl 2>/dev/null)
 if [ -z "$CHECK_CURL" ]; then
-    echo -e "\e[33m[!] Установка curl в контейнер...\e[0m"
-    sudo docker exec $CONTAINER_NAME sh -c "
-        if command -v apt-get >/dev/null; then apt-get update && apt-get install -y curl
-        elif command -v apk >/dev/null; then apk add --no-cache curl
-        fi" &>/dev/null
+    sudo docker exec $CONTAINER_NAME sh -c "if command -v apt-get >/dev/null; then apt-get update && apt-get install -y curl; elif command -v apk >/dev/null; then apk add --no-cache curl; fi" &>/dev/null
 fi
 
-# 3. УМНЫЙ ПОИСК ПАРАМЕТРОВ (v10)
-# Получаем строку процесса
+# 3. Поиск параметров API
 PROC_LINE=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
+GET_URL=$(echo "$PROC_LINE" | grep -oE 'token=[^ ]+' | cut -d= -f2 | sed 's/[[:space:]]*$//')
+GET_SOCK=$(echo "$PROC_LINE" | grep -oE '/run/[^ ]+\.sock' | sed 's/[[:space:]]*$//')
 
-# Пробуем вытащить токен (ищем все после token= до первого пробела или конца строки)
-GET_URL=$(echo "$PROC_LINE" | grep -oE 'token=[^ ]+' | cut -d= -f2)
-# Пробуем вытащить сокет (ищем путь начинающийся на /run/ и заканчивающийся на .sock)
-GET_SOCK=$(echo "$PROC_LINE" | grep -oE '/run/[^ ]+\.sock')
-
-# Если не нашли - пробуем через альтернативный sed
-if [[ -z "$GET_URL" ]]; then
-    GET_URL=$(echo "$PROC_LINE" | sed -n 's/.*token=\([^ &]*\).*/\1/p')
-fi
-
-# Проверка результата
 if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
     echo -e "\e[31m[!] Ошибка: Параметры API не найдены.\e[0m"
-    echo -e "\e[33mDebug - Строка процесса:\e[0m"
-    echo "$PROC_LINE"
     exit 1
 fi
 
 # 4. Получение конфига
 CONFIG_JSON=$(sudo docker exec $CONTAINER_NAME curl -sS --fail --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL")
 
-if [[ -z "$CONFIG_JSON" ]]; then
-    echo -e "\e[31m[!] Ошибка: API вернул пустоту.\e[0m"
+if [[ -z "$CONFIG_JSON" || "$CONFIG_JSON" == "{}" ]]; then
+    echo -e "\e[31m[!] Ошибка: API вернул пустой JSON.\e[0m"
     exit 1
 fi
 
-# 5. Парсинг данных
+# 5. Сбор логов
 RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME awk '/started/ {f=1; buf=""; next} f{buf=buf $0 ORS} END{printf "%s", buf}' $LOG_FILE | grep "error ping")
-MAP=$(echo "$CONFIG_JSON" | jq -r '(.routing.balancers[]? | "\(.tag):\(.selector | join(","))"), (.. | objects | select(.tag != null and .selector != null) | "\(.tag):\(.selector | join(","))")' 2>/dev/null | sort -u)
+
+# 6. ГЛУБОКИЙ ПАРСИНГ (v11)
+# Ищем балансировщики везде, где есть tag и selector
+MAP=$(echo "$CONFIG_JSON" | jq -r '.. | objects | select(.tag != null and .selector != null) | "\(.tag):\(.selector | join(","))"' 2>/dev/null | sort -u)
 ALL_OUTBOUNDS=$(echo "$CONFIG_JSON" | jq -r '.. | .outbounds? // empty | .[]?.tag' 2>/dev/null)
 
+# Fallback: если MAP пуст, пробуем парсить напрямую из секции routing
+if [[ -z "$MAP" ]]; then
+    MAP=$(echo "$CONFIG_JSON" | jq -r '.routing.balancers[]? | "\(.tag):\(.selector | join(","))"' 2>/dev/null | sort -u)
+fi
+
 if [[ -z "$MAP" || "$MAP" == "null" ]]; then
-    echo -e "\e[33m[?] Балансировщики не найдены.\e[0m"
+    echo -e "\e[33m[?] Балансировщики не найдены в JSON. Проверь структуру конфига.\e[0m"
+    echo -e "\e[36m--- DEBUG: Содержимое JSON (первые 200 символов) ---\e[0m"
+    echo "$CONFIG_JSON" | jq -c '.' | cut -c1-200
     exit 0
 fi
 
-# 6. Визуализация
+# 7. Визуализация
 echo -e "\n\e[1;34m================= SRE DASHBOARD =================\e[0m"
 echo -e "Timestamp: $(date '+%H:%M:%S') | Node: $(hostname)"
 echo "---------------------------------------------------------"
@@ -77,6 +70,7 @@ DETAILS=""
 while IFS=: read -r b_name selector; do
     [[ -z "$b_name" || "$b_name" == "null" ]] && continue
     
+    # Регулярка для префиксов
     search_pattern=$(echo "$selector" | sed 's/,/|^/g; s/^/^/')
     node_list=$(echo "$ALL_OUTBOUNDS" | grep -E "$search_pattern" | sort -u)
     
