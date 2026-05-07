@@ -31,15 +31,23 @@ if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
     exit 1
 fi
 
-# 4. Получение конфига (с защитой от не-JSON вывода)
-# Добавляем -i для отладки или проверяем чистоту вывода
+# 4. Получение конфига с защитой от ошибок вывода
+echo -e "\e[34m[*] Запрос конфигурации из API...\e[0m"
 CONFIG_RAW=$(sudo docker exec $CONTAINER_NAME curl -sS --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL" 2>&1)
 
-# Проверяем, является ли ответ валидным JSON
+# Проверка: является ли ответ валидным JSON
 if ! echo "$CONFIG_RAW" | jq . >/dev/null 2>&1; then
-    echo -e "\e[31m[!] Ошибка: API вернул не JSON. Скорее всего, проблема с правами на сокет или токеном.\e[0m"
-    echo -e "\e[33m--- RAW OUTPUT FROM CURL ---\e[0m"
+    echo -e "\e[31m[!] Ошибка: API вернул не JSON. Вероятно, curl вывел ошибку.\e[0m"
+    echo -e "\e[33m--- RAW OUTPUT (Текст ошибки) ---\e[0m"
     echo "$CONFIG_RAW" | head -n 5
+    echo -e "\e[33m---------------------------------\e[0m"
+    
+    # Мини-диагностика
+    if [[ "$CONFIG_RAW" == *"Permission denied"* ]]; then
+        echo -e "\e[36mСовет: Попробуй выдать права на сокет: sudo docker exec $CONTAINER_NAME chmod 666 $GET_SOCK\e[0m"
+    elif [[ "$CONFIG_RAW" == *"401"* ]] || [[ "$CONFIG_RAW" == *"Unauthorized"* ]]; then
+        echo -e "\e[36mСовет: Токен не подошел. Проверь пробелы в переменной GET_URL.\e[0m"
+    fi
     exit 1
 fi
 
