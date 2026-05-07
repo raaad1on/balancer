@@ -1,26 +1,54 @@
 #!/bin/bash
 
 # =================================================================
-# Xray Balancer Analyzer (SRE Debug Edition)
+# Xray Balancer Analyzer (Self-Healing Edition)
 # Usage: curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash
 # =================================================================
 
 CONTAINER_NAME="remnanode"
 LOG_FILE="/var/log/supervisor/xray.out.log"
 
-# 1. Поиск процесса и данных API
-PROC_DATA=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
+echo -e "\e[34m[*] Инициализация проверки окружения...\e[0m"
 
-# Более надежный способ вытащить токен и сокет (без -P)
+# 1. Проверка зависимостей на хосте
+if ! command -v jq &>/dev/null; then
+    echo -e "\e[33m[!] На хосте не найден jq. Установка...\e[0m"
+    sudo apt update && sudo apt install -y jq &>/dev/null
+fi
+
+# 2. Проверка и доустановка curl внутри контейнера
+CHECK_CURL=$(sudo docker exec $CONTAINER_NAME command -v curl 2>/dev/null)
+if [ -z "$CHECK_CURL" ]; then
+    echo -e "\e[33m[!] Внутри контейнера не найден curl. Попытка установки...\e[0m"
+    # Пытаемся определить пакетный менеджер (apt или apk)
+    sudo docker exec $CONTAINER_NAME sh -c "
+        if command -v apt-get >/dev/null; then
+            apt-get update && apt-get install -y curl
+        elif command -v apk >/dev/null; then
+            apk add --no-cache curl
+        else
+            echo 'ERROR: No package manager found' && exit 1
+        fi
+    " &>/dev/null
+    
+    if [ $? -ne 0 ]; then
+        echo -e "\e[31m[!] Не удалось установить curl автоматически. Проверь интернет в контейнере.\e[0m"
+        exit 1
+    fi
+    echo -e "\e[32m[+] Curl успешно установлен в контейнер.\e[0m"
+fi
+
+# 3. Поиск процесса и данных API
+PROC_DATA=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
 GET_URL=$(echo "$PROC_DATA" | sed -n 's/.*token=\([^ ]*\).*/\1/p')
 GET_SOCK=$(echo "$PROC_DATA" | sed -n 's/.* \(\/run\/[^? ]*\.sock\).*/\1/p')
 
-if [[ -z "$GET_URL" ]]; then
-    echo -e "\e[31m[!] Ошибка: Токен API не найден. Проверь процесс в докере.\e[0m"
+if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
+    echo -e "\e[31m[!] Ошибка: Не удалось вытащить параметры API из процесса.\e[0m"
     exit 1
 fi
 
-# 2. Получение конфига
+# 4. Получение конфига
 CONFIG_JSON=$(sudo docker exec $CONTAINER_NAME curl -sS --fail --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL")
 
 if [[ -z "$CONFIG_JSON" ]]; then
@@ -28,22 +56,17 @@ if [[ -z "$CONFIG_JSON" ]]; then
     exit 1
 fi
 
-# 3. Сбор логов и парсинг
+# 5. Парсинг и Логика
 RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME awk '/started/ {f=1; buf=""; next} f{buf=buf $0 ORS} END{printf "%s", buf}' $LOG_FILE | grep "error ping")
-
-# Пытаемся распарсить балансировщики двумя способами
 MAP=$(echo "$CONFIG_JSON" | jq -r '(.routing.balancers[]? | "\(.tag):\(.selector | join(","))"), (.. | objects | select(.tag != null and .selector != null) | "\(.tag):\(.selector | join(","))")' 2>/dev/null | sort -u)
 ALL_OUTBOUNDS=$(echo "$CONFIG_JSON" | jq -r '.. | .outbounds? // empty | .[]?.tag' 2>/dev/null)
 
-# Если MAP все еще пустой - выводим дебаг
 if [[ -z "$MAP" ]]; then
-    echo -e "\e[33m[?] Балансировщики не найдены. Первые 100 символов ответа API:\e[0m"
-    echo "$CONFIG_JSON" | cut -c1-100
-    echo -e "\n\e[36mСовет: проверь, что в конфиге есть секция \"routing\": { \"balancers\": [...] }\e[0m"
+    echo -e "\e[33m[?] Балансировщики в конфиге не найдены.\e[0m"
     exit 0
 fi
 
-# 4. Визуализация
+# 6. Визуализация
 echo -e "\n\e[1;34m================= SRE DASHBOARD =================\e[0m"
 echo -e "Timestamp: $(date '+%H:%M:%S') | Node: $(hostname)"
 echo "-------------------------------------------------"
@@ -54,7 +77,6 @@ DETAILS=""
 while IFS=: read -r b_name selector; do
     [[ -z "$b_name" || "$b_name" == "null" ]] && continue
     
-    # Регулярка для префиксов
     search_pattern=$(echo "$selector" | sed 's/,/|^/g; s/^/^/')
     node_list=$(echo "$ALL_OUTBOUNDS" | grep -E "$search_pattern" | sort -u)
     
@@ -62,7 +84,6 @@ while IFS=: read -r b_name selector; do
 
     for tag in $node_list; do
         ((b_total++))
-        # Экранируем точки в тегах (актуально для твоих новых логов типа al.anyway)
         safe_tag=$(echo "$tag" | sed 's/\./\\./g')
         err_line=$(echo "$RAW_ERRORS" | grep -E "with $safe_tag:" | tail -n 1)
         
