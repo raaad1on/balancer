@@ -1,34 +1,55 @@
 #!/bin/bash
 
-# =================================================================
-# Xray Balancer Analyzer (Force Parsing Edition)
-# Usage: curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash
-# =================================================================
-
 CONTAINER_NAME="remnanode"
-LOG_FILE="/var/log/supervisor/xray.out.log"
 
-echo -e "\e[34m[*] Инициализация проверки окружения...\e[0m"
+echo -e "\e[34m[*] Определяю операционную систему контейнера...\e[0m"
 
-# 1. Зависимости (хост)
-if ! command -v jq &>/dev/null; then
-    sudo apt update && sudo apt install -y jq &>/dev/null
+# 1. Инспекция OS внутри контейнера
+OS_TYPE=$(sudo docker exec $CONTAINER_NAME sh -c '
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        echo $ID
+    elif [ -f /etc/alpine-release ]; then
+        echo "alpine"
+    else
+        echo "unknown"
+    fi
+' 2>/dev/null)
+
+echo -e "\e[32m[+] Дистрибутив контейнера: $OS_TYPE\e[0m"
+
+# 2. Попытка установки curl в зависимости от дистрибутива
+if ! sudo docker exec $CONTAINER_NAME command -v curl &>/dev/null; then
+    echo -e "\e[33m[!] Curl не найден. Пытаюсь установить для $OS_TYPE...\e[0m"
+    
+    case "$OS_TYPE" in
+        "ubuntu"|"debian")
+            sudo docker exec $CONTAINER_NAME apt-get update && \
+            sudo docker exec $CONTAINER_NAME apt-get install -y curl &>/dev/null
+            ;;
+        "alpine")
+            sudo docker exec $CONTAINER_NAME apk add --no-cache curl &>/dev/null
+            ;;
+        "centos"|"rhel"|"fedora")
+            sudo docker exec $CONTAINER_NAME yum install -y curl &>/dev/null
+            ;;
+        *)
+            echo -e "\e[31m[!] Неизвестный дистрибутив или пакетный менеджер отсутствует.\e[0m"
+            # Попробуем wget как последний шанс, он часто вшит в busybox
+            if ! sudo docker exec $CONTAINER_NAME command -v wget &>/dev/null; then
+                 echo -e "\e[31m[!] Даже wget не найден. Контейнер слишком обрезан.\e[0m"
+            fi
+            ;;
+    esac
 fi
 
-# 2. Зависимости (контейнер)
-CHECK_CURL=$(sudo docker exec $CONTAINER_NAME command -v curl 2>/dev/null)
-if [ -z "$CHECK_CURL" ]; then
-    sudo docker exec $CONTAINER_NAME sh -c "if command -v apt-get >/dev/null; then apt-get update && apt-get install -y curl; elif command -v apk >/dev/null; then apk add --no-cache curl; fi" &>/dev/null
-fi
-
-# 3. Поиск параметров API
-PROC_LINE=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
-GET_URL=$(echo "$PROC_LINE" | grep -oE 'token=[^ ]+' | cut -d= -f2 | sed 's/[[:space:]]*$//')
-GET_SOCK=$(echo "$PROC_LINE" | grep -oE '/run/[^ ]+\.sock' | sed 's/[[:space:]]*$//')
-
-if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
-    echo -e "\e[31m[!] Ошибка: Параметры API не найдены.\e[0m"
-    exit 1
+# 3. Проверка результата установки
+if sudo docker exec $CONTAINER_NAME command -v curl &>/dev/null; then
+    echo -e "\e[32m[+] Curl готов к работе.\e[0m"
+else
+    echo -e "\e[31m[!] Не удалось подготовить curl внутри контейнера.\e[0m"
+    # Если это distroless, здесь можно добавить логику вытягивания конфига через cat /proc/... 
+    # или выполнение бинарника самого xray с флагом api, если он это умеет.
 fi
 
 # 4. Получение конфига с защитой от ошибок вывода
