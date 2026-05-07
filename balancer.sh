@@ -31,13 +31,19 @@ if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
     exit 1
 fi
 
-# 4. Получение конфига
-CONFIG_JSON=$(sudo docker exec $CONTAINER_NAME curl -sS --fail --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL")
+# 4. Получение конфига (с защитой от не-JSON вывода)
+# Добавляем -i для отладки или проверяем чистоту вывода
+CONFIG_RAW=$(sudo docker exec $CONTAINER_NAME curl -sS --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL" 2>&1)
 
-if [[ -z "$CONFIG_JSON" || "$CONFIG_JSON" == "{}" ]]; then
-    echo -e "\e[31m[!] Ошибка: API вернул пустой JSON.\e[0m"
+# Проверяем, является ли ответ валидным JSON
+if ! echo "$CONFIG_RAW" | jq . >/dev/null 2>&1; then
+    echo -e "\e[31m[!] Ошибка: API вернул не JSON. Скорее всего, проблема с правами на сокет или токеном.\e[0m"
+    echo -e "\e[33m--- RAW OUTPUT FROM CURL ---\e[0m"
+    echo "$CONFIG_RAW" | head -n 5
     exit 1
 fi
+
+CONFIG_JSON="$CONFIG_RAW"
 
 # 5. Сбор логов
 RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME awk '/started/ {f=1; buf=""; next} f{buf=buf $0 ORS} END{printf "%s", buf}' $LOG_FILE | grep "error ping")
