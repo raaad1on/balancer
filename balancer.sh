@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# Xray Balancer Analyzer (Self-Healing Edition)
+# Xray Balancer Analyzer (Aggressive Search Edition)
 # Usage: curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash
 # =================================================================
 
@@ -10,41 +10,41 @@ LOG_FILE="/var/log/supervisor/xray.out.log"
 
 echo -e "\e[34m[*] Инициализация проверки окружения...\e[0m"
 
-# 1. Проверка зависимостей на хосте
+# 1. Проверка jq на хосте
 if ! command -v jq &>/dev/null; then
-    echo -e "\e[33m[!] На хосте не найден jq. Установка...\e[0m"
+    echo -e "\e[33m[!] Установка jq...\e[0m"
     sudo apt update && sudo apt install -y jq &>/dev/null
 fi
 
-# 2. Проверка и доустановка curl внутри контейнера
+# 2. Проверка curl внутри контейнера
 CHECK_CURL=$(sudo docker exec $CONTAINER_NAME command -v curl 2>/dev/null)
 if [ -z "$CHECK_CURL" ]; then
-    echo -e "\e[33m[!] Внутри контейнера не найден curl. Попытка установки...\e[0m"
-    # Пытаемся определить пакетный менеджер (apt или apk)
+    echo -e "\e[33m[!] Установка curl в контейнер...\e[0m"
     sudo docker exec $CONTAINER_NAME sh -c "
-        if command -v apt-get >/dev/null; then
-            apt-get update && apt-get install -y curl
-        elif command -v apk >/dev/null; then
-            apk add --no-cache curl
-        else
-            echo 'ERROR: No package manager found' && exit 1
-        fi
-    " &>/dev/null
-    
-    if [ $? -ne 0 ]; then
-        echo -e "\e[31m[!] Не удалось установить curl автоматически. Проверь интернет в контейнере.\e[0m"
-        exit 1
-    fi
-    echo -e "\e[32m[+] Curl успешно установлен в контейнер.\e[0m"
+        if command -v apt-get >/dev/null; then apt-get update && apt-get install -y curl
+        elif command -v apk >/dev/null; then apk add --no-cache curl
+        fi" &>/dev/null
 fi
 
-# 3. Поиск процесса и данных API
-PROC_DATA=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
-GET_URL=$(echo "$PROC_DATA" | sed -n 's/.*token=\([^ ]*\).*/\1/p')
-GET_SOCK=$(echo "$PROC_DATA" | sed -n 's/.* \(\/run\/[^? ]*\.sock\).*/\1/p')
+# 3. УМНЫЙ ПОИСК ПАРАМЕТРОВ (v10)
+# Получаем строку процесса
+PROC_LINE=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
 
+# Пробуем вытащить токен (ищем все после token= до первого пробела или конца строки)
+GET_URL=$(echo "$PROC_LINE" | grep -oE 'token=[^ ]+' | cut -d= -f2)
+# Пробуем вытащить сокет (ищем путь начинающийся на /run/ и заканчивающийся на .sock)
+GET_SOCK=$(echo "$PROC_LINE" | grep -oE '/run/[^ ]+\.sock')
+
+# Если не нашли - пробуем через альтернативный sed
+if [[ -z "$GET_URL" ]]; then
+    GET_URL=$(echo "$PROC_LINE" | sed -n 's/.*token=\([^ &]*\).*/\1/p')
+fi
+
+# Проверка результата
 if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
-    echo -e "\e[31m[!] Ошибка: Не удалось вытащить параметры API из процесса.\e[0m"
+    echo -e "\e[31m[!] Ошибка: Параметры API не найдены.\e[0m"
+    echo -e "\e[33mDebug - Строка процесса:\e[0m"
+    echo "$PROC_LINE"
     exit 1
 fi
 
@@ -52,26 +52,26 @@ fi
 CONFIG_JSON=$(sudo docker exec $CONTAINER_NAME curl -sS --fail --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL")
 
 if [[ -z "$CONFIG_JSON" ]]; then
-    echo -e "\e[31m[!] Ошибка: API вернул пустой ответ.\e[0m"
+    echo -e "\e[31m[!] Ошибка: API вернул пустоту.\e[0m"
     exit 1
 fi
 
-# 5. Парсинг и Логика
+# 5. Парсинг данных
 RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME awk '/started/ {f=1; buf=""; next} f{buf=buf $0 ORS} END{printf "%s", buf}' $LOG_FILE | grep "error ping")
 MAP=$(echo "$CONFIG_JSON" | jq -r '(.routing.balancers[]? | "\(.tag):\(.selector | join(","))"), (.. | objects | select(.tag != null and .selector != null) | "\(.tag):\(.selector | join(","))")' 2>/dev/null | sort -u)
 ALL_OUTBOUNDS=$(echo "$CONFIG_JSON" | jq -r '.. | .outbounds? // empty | .[]?.tag' 2>/dev/null)
 
-if [[ -z "$MAP" ]]; then
-    echo -e "\e[33m[?] Балансировщики в конфиге не найдены.\e[0m"
+if [[ -z "$MAP" || "$MAP" == "null" ]]; then
+    echo -e "\e[33m[?] Балансировщики не найдены.\e[0m"
     exit 0
 fi
 
 # 6. Визуализация
 echo -e "\n\e[1;34m================= SRE DASHBOARD =================\e[0m"
 echo -e "Timestamp: $(date '+%H:%M:%S') | Node: $(hostname)"
-echo "-------------------------------------------------"
-printf "%-25s | %-10s | %-10s\n" "BALANCER" "HEALTH" "NODES"
-echo "-------------------------------------------------"
+echo "---------------------------------------------------------"
+printf "%-30s | %-10s | %-10s\n" "BALANCER" "HEALTH" "NODES"
+echo "---------------------------------------------------------"
 
 DETAILS=""
 while IFS=: read -r b_name selector; do
@@ -93,7 +93,7 @@ while IFS=: read -r b_name selector; do
                 *deadline*)    msg="TIMEOUT" ;;
                 *)             msg="ERROR" ;;
             esac
-            b_err_logs="${b_err_logs}\n  \e[31m✖\e[0m %-25s -> %s"
+            b_err_logs="${b_err_logs}\n  \e[31m✖\e[0m %-30s -> %s"
             b_err_logs=$(printf "$b_err_logs" "$tag" "$msg")
         else
             ((b_alive++))
@@ -102,14 +102,14 @@ while IFS=: read -r b_name selector; do
 
     health="${b_alive}/${b_total}"
     if [[ $b_alive -eq $b_total ]]; then
-        printf "%-25s | \e[32m%-10s\e[0m | %-10s\n" "$b_name" "CLEAN" "$health"
+        printf "%-30s | \e[32m%-10s\e[0m | %-10s\n" "$b_name" "CLEAN" "$health"
     elif [[ $b_alive -eq 0 ]]; then
-        printf "%-25s | \e[31m%-10s\e[0m | %-10s\n" "$b_name" "DEAD" "$health"
+        printf "%-30s | \e[31m%-10s\e[0m | %-10s\n" "$b_name" "DEAD" "$health"
     else
-        printf "%-25s | \e[33m%-10s\e[0m | %-10s\n" "$b_name" "UNSTABLE" "$health"
+        printf "%-30s | \e[33m%-10s\e[0m | %-10s\n" "$b_name" "UNSTABLE" "$health"
     fi
     [[ -n "$b_err_logs" ]] && DETAILS="${DETAILS}\n\e[1m[$b_name Faults]:\e[0m${b_err_logs}"
 done <<< "$MAP"
 
 [[ -n "$DETAILS" ]] && echo -e "\n\e[1;33m--- DETAILED INCIDENTS ---\e[0m$DETAILS"
-echo -e "\n\e[1;34m=================================================\e[0m\n"
+echo -e "\n\e[1;34m=========================================================\e[0m\n"
