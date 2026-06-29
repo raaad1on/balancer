@@ -69,7 +69,7 @@ while IFS=: read -r b_name selector; do
     [[ -z "$b_name" ]] && continue
     search_pattern=$(echo "$selector" | sed 's/,/|^/g; s/^/^/')
     node_list=$(echo "$ALL_OUTBOUNDS" | grep -E "$search_pattern" | sort -u)
-    
+
     b_total=0; b_alive=0; b_err_logs=""
     for tag in $node_list; do
         ((b_total++))
@@ -87,3 +87,48 @@ while IFS=: read -r b_name selector; do
 done <<< "$MAP"
 
 [[ -n "$DETAILS" ]] && echo -e "\n\e[1;33m--- INCIDENTS ---\e[0m$DETAILS"
+
+# =================================================================
+# OUTBOUND METRICS (observatory from /debug/vars)
+# =================================================================
+echo -e "\n\e[1;34m=============== OUTBOUND METRICS ===============\e[0m"
+
+DEBUG_VARS=$(sudo docker exec $CONTAINER_NAME curl -sS http://127.0.0.1:11111/debug/vars 2>/dev/null)
+
+if ! echo "$DEBUG_VARS" | jq -e '.observatory' >/dev/null 2>&1; then
+    echo -e "\e[33m[?] Observatory метрики недоступны.\e[0m"
+    exit 0
+fi
+
+# Парсим observatory и выводим сгруппированные по балансировщикам метрики
+echo "$DEBUG_VARS" | jq -r '
+  # Функция определения балансировщика по тегу
+  def get_balancer($tag):
+    if ($tag | startswith("al")) then "YT-Balancer"
+    elif ($tag | startswith("fi") or startswith("1se") or startswith("ch")) then "FI-Balancer"
+    elif ($tag | startswith("ru")) then "RU-Balancer"
+    elif ($tag | startswith("1de35")) then "DE-Balancer"
+    elif ($tag | startswith("de") or startswith("nl") or startswith("se")) then "EU-Balancer"
+    elif ($tag | startswith("au")) then "AU-Balancer"
+    else "Unknown-Pool"
+    end;
+
+  # Преобразуем объект observatory в массив и добавляем balancer
+  [.observatory[]]
+  | map(. + {balancer: get_balancer(.outbound_tag)})
+
+  # Группируем по балансировщикам
+  | group_by(.balancer) | .[]
+  | (.[0].balancer) as $b_name
+
+  # Выводим заголовок и таблицу для каждого балансировщика
+  | "\n=== \($b_name) ===",
+    "LOCATION|RAW (ms)|xHTTP (ms)",
+    (
+      group_by(.outbound_tag | split(".")[0] | split("-")[0]) | .[]
+      | (.[0].outbound_tag | split(".")[0] | split("-")[0]) as $loc
+      | (.[] | select(.outbound_tag | endswith("-raw")) | .delay) as $raw
+      | (.[] | select(.outbound_tag | endswith("-xHTTP")) | .delay) as $xhttp
+      | "\($loc)|\($raw // "-")|\($xhttp // "-")"
+    )
+' 2>/dev/null | column -t -s '|'

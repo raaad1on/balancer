@@ -1,6 +1,6 @@
 # Xray Balancer Analyzer (SRE Edition)
 
-Анализ состояния балансировщиков Xray на основе префиксов с визуализацией в реальном времени.
+Анализ состояния балансировщиков Xray с метриками задержек по аутбандам.
 
 ## 🚀 Быстрый старт
 
@@ -45,28 +45,43 @@ bcheck
 
 ## 📊 Что показывает
 
+### SRE Dashboard — статусы балансировщиков
+
 ```
 ================= SRE DASHBOARD =================
-Timestamp: 14:23:45 | Match Mode: PREFIX-ONLY
--------------------------------------------------
-BALANCER             | HEALTH     | NODES
--------------------------------------------------
-EU-Balancer          | CLEAN      | 4/4
-US-Balancer          | UNSTABLE   | 3/4
-ASIA-Balancer        | DEAD       | 0/2
-[...]
+BALANCER                       | HEALTH     | NODES
+---------------------------------------------------------
+EU-Balancer                    | CLEAN      | 2/2
+FI-balancer                    | CLEAN      | 6/6
+YT-Balancer                    | FAIL       | 1/2
 
---- DETAILED INCIDENTS ---
-[EU-Balancer Faults]:
-  ✖ eu-node-3        -> TIMEOUT
+--- INCIDENTS ---
+[YT-Balancer Faults]:
+  ✖ al.anyway-raw
+```
+
+### Outbound Metrics — задержки по аутбандам
+
+```
+=============== OUTBOUND METRICS ===============
+=== EU-Balancer ===
+LOCATION  RAW (ms)  xHTTP (ms)
+de        128       43
+se01      86        24
+=== FI-Balancer ===
+LOCATION  RAW (ms)  xHTTP (ms)
+fi04      82        27
+fi05      65        27
+=== YT-Balancer ===
+LOCATION  RAW (ms)  xHTTP (ms)
+al        161       51
 ```
 
 ### Статусы здоровья
 
 - **CLEAN** 🟢 — все ноды работают
-- **UNSTABLE** 🟡 — часть нод упала
+- **FAIL** 🟡 — часть нод упала
 - **DEAD** 🔴 — все ноды недоступны
-- **EMPTY** ⚪ — нет нод в селекторе
 
 ## 🔍 Как работает
 
@@ -86,10 +101,24 @@ Selector: "EU-,US-"
 
 ### Сбор данных
 
-1. **Извлечение API kredentials** — из процесса `rw-core` в контейнере
+1. **Извлечение API credentials** — из процесса `rw-core` в контейнере
 2. **Загрузка конфига** — через Unix-сокет (без временных файлов)
 3. **Анализ логов** — поиск ошибок ping после последнего рестарта
-4. **Парсинг результатов** — jq для структурированного разбора JSON
+4. **Outbound метрики** — запрос к `/debug/vars` (порт 11111) внутри контейнера
+5. **Парсинг результатов** — jq для структурированного разбора JSON
+
+### Определение балансировщика по тегу
+
+Для группировки outbound метрик используется функция определения балансировщика по префиксу outbound_tag:
+
+| Префикс тега     | Балансировщик    |
+|------------------|------------------|
+| `al*`            | YT-Balancer      |
+| `fi*`, `1se*`, `ch*` | FI-Balancer |
+| `ru*`            | RU-Balancer      |
+| `1de35*`         | DE-Balancer      |
+| `de*`, `nl*`, `se*` | EU-Balancer   |
+| `au*`            | AU-Balancer      |
 
 ## 🛡️ Особенности Production
 
@@ -97,6 +126,7 @@ Selector: "EU-,US-"
 - ✅ **Проверки безопасности** — Docker и контейнер должны существовать
 - ✅ **One-liner ready** — корректная обработка потоков для `curl | bash`
 - ✅ **Prefix-only mode** — 1de не «залетит» в EU-Balancer
+- ✅ **Outbound метрики** — задержки RAW и xHTTP протоколов по каждому аутбанду
 - ✅ **Структурированный вывод** — легко парсить в мониторинговые системы
 
 ## 📝 Примеры использования
@@ -129,6 +159,7 @@ HEALTH=$(curl -sSL ... | grep "UNSTABLE\|DEAD" | wc -l)
 | `Error: Container remnanode is not running` | Проверить: `docker ps` |
 | `Error: Could not extract API credentials` | Проверить процесс: `docker exec remnanode ps aux \| grep rw-core` |
 | `Error: API request failed` | Проверить логи контейнера: `docker logs remnanode` |
+| `Observatory метрики недоступны` | Проверить что `/debug/vars` отвечает на порту 11111 внутри контейнера |
 
 ## 🤝 Лицензия
 
