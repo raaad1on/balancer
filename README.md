@@ -51,30 +51,51 @@ bcheck
 ================= SRE DASHBOARD =================
 BALANCER                       | HEALTH     | NODES
 ---------------------------------------------------------
-EU-Balancer                    | CLEAN      | 2/2
-FI-balancer                    | CLEAN      | 6/6
-YT-Balancer                    | FAIL       | 1/2
+DE-Balancer                    | CLEAN      | 2/2
+EU-Balancer                    | FAIL       | 10/12
+FI-Balancer                    | FAIL       | 5/6
+RU-Balancer                    | CLEAN      | 4/4
+YT-Balancer                    | FAIL       | 5/6
 
 --- INCIDENTS ---
+[EU-Balancer Faults]:
+  ✖ de05-xHTTP
+  ✖ de07-raw
+[FI-Balancer Faults]:
+  ✖ fi04-raw
 [YT-Balancer Faults]:
-  ✖ al.anyway-raw
+  ✖ al02-raw
 ```
 
 ### Outbound Metrics — задержки по аутбандам
 
 ```
 =============== OUTBOUND METRICS ===============
+=== DE-Balancer ===
+LOCATION              RAW (ms)  xHTTP (ms)
+1de08                 131       47
 === EU-Balancer ===
-LOCATION  RAW (ms)  xHTTP (ms)
-de        128       43
-se01      86        24
+LOCATION              RAW (ms)  xHTTP (ms)
+de03                  197       63
+de05                  209       68
+de07                  123       44
+nl03                  350       46
+nl04                  129       47
+se01                  63        20
 === FI-Balancer ===
-LOCATION  RAW (ms)  xHTTP (ms)
-fi04      82        27
-fi05      65        27
+LOCATION              RAW (ms)  xHTTP (ms)
+ch01                  136       43
+fi04                  73        22
+fi05                  69        23
+=== RU-Balancer ===
+LOCATION              RAW (ms)  xHTTP (ms)
+ru17                  9         3
+ru18                  11        4
 === YT-Balancer ===
-LOCATION  RAW (ms)  xHTTP (ms)
-al        161       51
+LOCATION              RAW (ms)  xHTTP (ms)
+al02                  134       44
+al06                  136       45
+al07                  137       47
 ```
 
 ### Статусы здоровья
@@ -107,18 +128,9 @@ Selector: "EU-,US-"
 4. **Outbound метрики** — запрос к `/debug/vars` (порт 11111) внутри контейнера
 5. **Парсинг результатов** — jq для структурированного разбора JSON
 
-### Определение балансировщика по тегу
+### Группировка outbound метрик
 
-Для группировки outbound метрик используется функция определения балансировщика по префиксу outbound_tag:
-
-| Префикс тега     | Балансировщик    |
-|------------------|------------------|
-| `al*`            | YT-Balancer      |
-| `fi*`, `1se*`, `ch*` | FI-Balancer |
-| `ru*`            | RU-Balancer      |
-| `1de35*`         | DE-Balancer      |
-| `de*`, `nl*`, `se*` | EU-Balancer   |
-| `au*`            | AU-Balancer      |
+Группировка аутбандов по балансировщикам выполняется динамически на основе селекторов из конфига (`MAP`). Для каждого аутбанда из `observatory` определяется его балансировщик через префикс-матчинг по селекторам, указанным в конфигурации балансировщиков. Это гарантирует, что группировка всегда соответствует актуальной конфигурации, а не хардкодным правилам.
 
 ## 🛡️ Особенности Production
 
@@ -127,6 +139,7 @@ Selector: "EU-,US-"
 - ✅ **One-liner ready** — корректная обработка потоков для `curl | bash`
 - ✅ **Prefix-only mode** — 1de не «залетит» в EU-Balancer
 - ✅ **Outbound метрики** — задержки RAW и xHTTP протоколов по каждому аутбанду
+- ✅ **Динамическая группировка** — селекторы берутся из конфига, не нужно хардкодить правила
 - ✅ **Структурированный вывод** — легко парсить в мониторинговые системы
 
 ## 📝 Примеры использования
