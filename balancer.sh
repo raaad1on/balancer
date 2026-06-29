@@ -98,29 +98,84 @@ DEBUG_VARS=$(sudo docker exec $CONTAINER_NAME curl -sS http://127.0.0.1:11111/de
 if ! echo "$DEBUG_VARS" | jq -e '.observatory' >/dev/null 2>&1; then
     echo -e "\e[33m[?] Observatory метрики недоступны.\e[0m"
 else
-  echo "$DEBUG_VARS" | jq -r '
-    def get_balancer($tag):
-      if ($tag | startswith("al")) then "YT-Balancer"
-      elif ($tag | startswith("fi") or startswith("1se") or startswith("ch")) then "FI-Balancer"
-      elif ($tag | startswith("ru")) then "RU-Balancer"
-      elif ($tag | startswith("1de35")) then "DE-Balancer"
-      elif ($tag | startswith("de") or startswith("nl") or startswith("se")) then "EU-Balancer"
-      elif ($tag | startswith("au")) then "AU-Balancer"
-      else "Unknown-Pool"
-      end;
+  # Собираем все entry из observatory во временный файл
+  echo "$DEBUG_VARS" | jq -r '.observatory | to_entries[] | "\(.key)|\(.value.delay)"' 2>/dev/null > /tmp/balancer_obs.tmp
 
-    [.observatory[]]
-    | map(. + {balancer: get_balancer(.outbound_tag)})
-    | group_by(.balancer) | .[]
-    | (.[0].balancer) as $b_name
-    | "\n=== \($b_name) ===",
-      "LOCATION|RAW (ms)|xHTTP (ms)",
-      (
-        group_by(.outbound_tag | split(".")[0] | split("-")[0]) | .[]
-        | (.[0].outbound_tag | split(".")[0] | split("-")[0]) as $loc
-        | (.[] | select(.outbound_tag | endswith("-raw")) | .delay) as $raw
-        | (.[] | select(.outbound_tag | endswith("-xHTTP")) | .delay) as $xhttp
-        | "\($loc)|\($raw // "-")|\($xhttp // "-")"
-      )
-  ' 2>/dev/null | column -t -s '|'
+  # Собираем пары prefix|balancer из MAP (сортируем от длинных префиксов к коротким)
+  echo "$MAP" > /tmp/balancer_map_raw.tmp
+  > /tmp/balancer_map.tmp
+  while IFS=: read -r b_name selector; do
+      [[ -z "$b_name" ]] && continue
+      IFS=',' read -ra prefixes <<< "$selector"
+      for prefix in "${prefixes[@]}"; do
+          echo "$prefix|$b_name" >> /tmp/balancer_map.tmp
+      done
+  done < /tmp/balancer_map_raw.tmp
+  sort -t'|' -k1,1 -r /tmp/balancer_map.tmp -o /tmp/balancer_map.tmp
+  rm -f /tmp/balancer_map_raw.tmp
+
+  # Собираем данные: balancer|loc|raw|xhttp
+  > /tmp/balancer_data.tmp
+  while IFS='|' read -r tag delay; do
+      [[ -z "$tag" || -z "$delay" ]] && continue
+
+      # Определяем балансировщик по префикс-матчингу
+      matched="Unknown-Pool"
+      while IFS='|' read -r prefix b_name; do
+          if [[ "$tag" == "$prefix"* ]]; then
+              matched="$b_name"
+              break
+          fi
+      done < /tmp/balancer_map.tmp
+
+      # Извлекаем локацию
+      loc=$(echo "$tag" | sed 's/-raw$//; s/-xHTTP$//' | sed 's/\..*//; s/-.*//')
+
+      # Определяем тип
+      if [[ "$tag" == *-raw ]]; then
+          echo "$matched|$loc|raw|$delay" >> /tmp/balancer_data.tmp
+      elif [[ "$tag" == *-xHTTP ]]; then
+          echo "$matched|$loc|xhttp|$delay" >> /tmp/balancer_data.tmp
+      fi
+  done < /tmp/balancer_obs.tmp
+
+  # Группируем и выводим
+  prev_balancer=""
+  prev_loc=""
+  raw_val=""
+  xhttp_val=""
+  while IFS='|' read -r b_name loc ptype delay; do
+      if [[ "$b_name" != "$prev_balancer" ]]; then
+          # Выводим предыдущую локацию если есть
+          if [[ -n "$prev_loc" ]]; then
+              printf "%-22s | %-10s | %-10s\n" "$prev_loc" "$raw_val" "$xhttp_val"
+          fi
+          [[ -n "$prev_balancer" ]] && echo ""
+          echo -e "\n=== $b_name ==="
+          printf "%-22s | %-10s | %-10s\n" "LOCATION" "RAW (ms)" "xHTTP (ms)"
+          prev_balancer="$b_name"
+          prev_loc=""
+          raw_val=""
+          xhttp_val=""
+      fi
+      if [[ "$loc" != "$prev_loc" ]]; then
+          if [[ -n "$prev_loc" ]]; then
+              printf "%-22s | %-10s | %-10s\n" "$prev_loc" "$raw_val" "$xhttp_val"
+          fi
+          prev_loc="$loc"
+          raw_val="-"
+          xhttp_val="-"
+      fi
+      if [[ "$ptype" == "raw" ]]; then
+          raw_val="$delay"
+      else
+          xhttp_val="$delay"
+      fi
+  done < <(sort -t'|' -k1,1 -k2,2 -k3,3 /tmp/balancer_data.tmp)
+  # Последняя строка
+  if [[ -n "$prev_loc" ]]; then
+      printf "%-22s | %-10s | %-10s\n" "$prev_loc" "$raw_val" "$xhttp_val"
+  fi
+
+  rm -f /tmp/balancer_obs.tmp /tmp/balancer_map.tmp /tmp/balancer_data.tmp
 fi
