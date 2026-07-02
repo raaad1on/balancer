@@ -1,59 +1,24 @@
 #!/bin/bash
 
 # =================================================================
-# Xray Balancer Analyzer (Alpine & Root Fix)
+# Xray Balancer Analyzer (SRE Edition)
 # =================================================================
 
 CONTAINER_NAME="remnanode"
-LOG_FILE="/var/log/supervisor/xray.out.log"
 
-echo -e "\e[34m[*] Определяю операционную систему контейнера...\e[0m"
-
-# 1. Определение OS
-OS_TYPE=$(sudo docker exec $CONTAINER_NAME sh -c '
-    if [ -f /etc/os-release ]; then . /etc/os-release; echo $ID
-    elif [ -f /etc/alpine-release ]; then echo "alpine"
-    else echo "unknown"; fi' 2>/dev/null)
-
-echo -e "\e[32m[+] Дистрибутив: $OS_TYPE\e[0m"
-
-# 2. Установка Curl (с правами root)
-if ! sudo docker exec $CONTAINER_NAME command -v curl &>/dev/null; then
-    echo -e "\e[33m[!] Curl не найден. Установка...\e[0m"
-    if [ "$OS_TYPE" == "alpine" ]; then
-        sudo docker exec -u 0 $CONTAINER_NAME apk add --no-cache curl &>/dev/null
-    else
-        sudo docker exec -u 0 $CONTAINER_NAME apt-get update && \
-        sudo docker exec -u 0 $CONTAINER_NAME apt-get install -y curl &>/dev/null
-    fi
-fi
-
-# 3. УЛУЧШЕННЫЙ ПОИСК ПАРАМЕТРОВ
-PROC_LINE=$(sudo docker exec $CONTAINER_NAME ps auxww | grep -E 'rw-core|xray' | grep -v grep | head -n 1)
-
-# Извлекаем токен и сокет, удаляя возможные лишние символы и кавычки
-GET_URL=$(echo "$PROC_LINE" | grep -oE 'token=[^ ]+' | cut -d= -f2 | tr -d '"'\'' ')
-GET_SOCK=$(echo "$PROC_LINE" | grep -oE '/run/[^ ]+\.sock' | tr -d '"'\'' ')
-
-if [[ -z "$GET_URL" || -z "$GET_SOCK" ]]; then
-    echo -e "\e[31m[!] Ошибка: Не удалось найти токен или сокет в процессе.\e[0m"
-    echo -e "\e[33mСтрока процесса:\e[0m $PROC_LINE"
-    exit 1
-fi
-
-# 4. Запрос конфигурации
-echo -e "\e[34m[*] Запрос API (Socket: $GET_SOCK)...\e[0m"
-CONFIG_RAW=$(sudo docker exec $CONTAINER_NAME curl -sS --unix-socket "$GET_SOCK" "http://localhost/internal/get-config?token=$GET_URL" 2>&1)
+# 1. Получение конфига через официальную cli команду
+echo -e "\e[34m[*] Запрос конфигурации через cli --dump-config...\e[0m"
+CONFIG_RAW=$(sudo docker exec $CONTAINER_NAME cli --dump-config 2>/dev/null | sed -n '/^{/,/^}/p')
 
 if ! echo "$CONFIG_RAW" | jq . >/dev/null 2>&1; then
-    echo -e "\e[31m[!] Ошибка API:\e[0m $CONFIG_RAW"
+    echo -e "\e[31m[!] Ошибка: Не удалось получить конфиг через cli --dump-config\e[0m"
     exit 1
 fi
 
-# 5. Парсинг и Таблица (v11+)
+# 2. Парсинг и Таблица
 MAP=$(echo "$CONFIG_RAW" | jq -r '.. | objects | select(.tag != null and .selector != null) | "\(.tag):\(.selector | join(","))"' 2>/dev/null | sort -u)
 ALL_OUTBOUNDS=$(echo "$CONFIG_RAW" | jq -r '.. | .outbounds? // empty | .[]?.tag' 2>/dev/null)
-RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME awk '/started/ {f=1; buf=""; next} f{buf=buf $0 ORS} END{printf "%s", buf}' $LOG_FILE | grep "error ping")
+RAW_ERRORS=$(sudo docker exec $CONTAINER_NAME sh -c 'cat /var/log/xray/current 2>/dev/null || cat /var/log/supervisor/xray.out.log 2>/dev/null' 2>/dev/null | grep "error ping")
 
 if [[ -z "$MAP" ]]; then
     echo -e "\e[33m[?] Балансировщики не найдены в конфиге.\e[0m"
@@ -146,7 +111,6 @@ else
   xhttp_val=""
   while IFS='|' read -r b_name loc ptype delay; do
       if [[ "$b_name" != "$prev_balancer" ]]; then
-          # Выводим предыдущую локацию если есть
           if [[ -n "$prev_loc" ]]; then
               printf "%-22s | %-10s | %-10s\n" "$prev_loc" "$raw_val" "$xhttp_val"
           fi
