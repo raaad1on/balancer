@@ -5,16 +5,7 @@
 # =================================================================
 
 CONTAINER_NAME="remnanode"
-
-# 0. Установка curl внутри контейнера (нужен для /debug/vars)
-if ! sudo docker exec $CONTAINER_NAME command -v curl &>/dev/null; then
-    echo -e "\e[33m[!] Curl не найден в контейнере. Установка...\e[0m"
-    sudo docker exec -u 0 $CONTAINER_NAME sh -c '
-        if command -v apk >/dev/null 2>&1; then apk add --no-cache curl
-        elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq curl
-        fi
-    ' &>/dev/null
-fi
+CONTAINER_PID=$(sudo docker inspect --format '{{.State.Pid}}' "$CONTAINER_NAME" 2>/dev/null)
 
 # 1. Получение конфига через официальную cli команду
 echo -e "\e[34m[*] Запрос конфигурации через cli --dump-config...\e[0m"
@@ -68,7 +59,7 @@ done <<< "$MAP"
 # =================================================================
 echo -e "\n\e[1;34m=============== OUTBOUND METRICS ===============\e[0m"
 
-DEBUG_VARS=$(sudo docker exec $CONTAINER_NAME curl -sS http://127.0.0.1:11111/debug/vars 2>/dev/null)
+DEBUG_VARS=$(sudo nsenter -t "$CONTAINER_PID" -n curl -sS http://127.0.0.1:11111/debug/vars 2>/dev/null)
 
 if ! echo "$DEBUG_VARS" | jq -e '.observatory' >/dev/null 2>&1; then
     echo -e "\e[33m[?] Observatory метрики недоступны.\e[0m"
