@@ -6,6 +6,16 @@
 
 CONTAINER_NAME="remnanode"
 
+# 0. Установка curl внутри контейнера (нужен для /debug/vars)
+if ! sudo docker exec $CONTAINER_NAME command -v curl &>/dev/null; then
+    echo -e "\e[33m[!] Curl не найден в контейнере. Установка...\e[0m"
+    sudo docker exec -u 0 $CONTAINER_NAME sh -c '
+        if command -v apk >/dev/null 2>&1; then apk add --no-cache curl
+        elif command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq curl
+        fi
+    ' &>/dev/null
+fi
+
 # 1. Получение конфига через официальную cli команду
 echo -e "\e[34m[*] Запрос конфигурации через cli --dump-config...\e[0m"
 CONFIG_RAW=$(sudo docker exec $CONTAINER_NAME cli --dump-config 2>/dev/null | sed -n '/^{/,/^}/p')
