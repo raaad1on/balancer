@@ -64,7 +64,7 @@ if ! echo "$DEBUG_VARS" | jq -e '.observatory' >/dev/null 2>&1; then
     echo -e "\e[33m[?] Observatory метрики недоступны.\e[0m"
 else
   # Собираем все entry из observatory во временный файл
-  echo "$DEBUG_VARS" | jq -r '.observatory | to_entries[] | "\(.key)|\(.value.delay)"' 2>/dev/null > /tmp/balancer_obs.tmp
+  echo "$DEBUG_VARS" | jq -r '.observatory | to_entries[] | "\(.key)|\(.value.delay // "-")"' 2>/dev/null > /tmp/balancer_obs.tmp
 
   # Собираем пары prefix|balancer из MAP (сортируем от длинных префиксов к коротким)
   echo "$MAP" > /tmp/balancer_map_raw.tmp
