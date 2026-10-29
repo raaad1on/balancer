@@ -1,16 +1,16 @@
 # Xray Balancer Analyzer (SRE Edition)
 
-Анализ состояния балансировщиков Xray с метриками задержек по аутбандам.
+Живой дашборд балансировщиков Xray. Состав leastLoad-пула, RTT и stdev берутся из `/debug/vars`, без разбора логов.
 
-## 🚀 Быстрый старт
+## Быстрый старт
 
-### Вариант 1: Одна команда (рекомендуется для Production)
+Нужен терминал (`ssh -t`). На хосте, где запущен контейнер `remnanode`:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash
 ```
 
-### Вариант 2: Локальное выполнение
+Локально:
 
 ```bash
 git clone https://github.com/raaad1on/balancer.git
@@ -19,165 +19,55 @@ chmod +x balancer.sh
 sudo ./balancer.sh
 ```
 
-### Вариант 3: Alias для частого использования
-
-Добавить в `~/.bashrc`:
+Один кадр без полноэкранного режима (cron, пайп):
 
 ```bash
-alias bcheck='curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash'
+sudo ./balancer.sh --once
 ```
 
-Затем просто запускать:
+Клавиши: `q` выход, `j`/`k` прокрутка, `[` `]` соседний пул, `r` обновить, `+`/`-` интервал. По умолчанию обновление раз в 2 секунды (`BALANCER_INTERVAL`).
 
-```bash
-bcheck
-```
+## Требования
 
-## 📋 Требования
+- **Docker** — контейнер `remnanode`
+- **python3** — интерфейс и разбор JSON
+- **curl** — запрос `/debug/vars` с хоста через `nsenter`
+- **sudo** — если скрипт запущен не от root
 
-- **Docker** — для доступа к контейнеру `remnanode`
-- **jq** — для парсинга JSON
-- **curl** — для HTTP-запросов
-- **awk** — для обработки логов
-- **sudo доступ** — для работы с Docker и логами
+## Что показывает
 
-Скрипт автоматически проверит наличие всех инструментов при запуске.
+Для каждого балансировщика из конфига:
 
-## 📊 Что показывает
+- селекторы, `expected`, `maxRTT`, `baseline` и шкала 20/40/50/70/90/100% от `maxRTT`
+- все аутбаунды пула: RTT, STDEV, AVG, MIN, MAX, число проб, cost
 
-### SRE Dashboard — статусы балансировщиков
+Цвет RTT — доля от `maxRTT` этого балансировщика: синий до 20%, зелёный до 40%, жёлтый до 50%, оранжевый до 70%, красный до 90%, коричневый от 100%.
 
-```
-================= SRE DASHBOARD =================
-BALANCER                       | HEALTH     | NODES
----------------------------------------------------------
-DE-Balancer                    | CLEAN      | 2/2
-EU-Balancer                    | FAIL       | 10/12
-FI-Balancer                    | FAIL       | 5/6
-RU-Balancer                    | CLEAN      | 4/4
-YT-Balancer                    | FAIL       | 5/6
+Колонка `POOL`:
 
---- INCIDENTS ---
-[EU-Balancer Faults]:
-  ✖ de05-xHTTP
-  ✖ de07-raw
-[FI-Balancer Faults]:
-  ✖ fi04-raw
-[YT-Balancer Faults]:
-  ✖ al02-raw
-```
+- `✓` — нода сейчас в leastLoad-пуле
+- `○` — живая, но не выбрана
+- `✗` — мёртвая или RTT не ниже `maxRTT`
 
-### Outbound Metrics — задержки по аутбандам
+Пул считается так же, как leastLoad в Xray: живые ноды с `delay < maxRTT`, сортировка по stdev с учётом `sqrt(cost)`, затем baseline и `expected`.
 
-```
-=============== OUTBOUND METRICS ===============
-=== DE-Balancer ===
-LOCATION              RAW (ms)  xHTTP (ms)
-1de08                 131       47
-=== EU-Balancer ===
-LOCATION              RAW (ms)  xHTTP (ms)
-de03                  197       63
-de05                  209       68
-de07                  123       44
-nl03                  350       46
-nl04                  129       47
-se01                  63        20
-=== FI-Balancer ===
-LOCATION              RAW (ms)  xHTTP (ms)
-ch01                  136       43
-fi04                  73        22
-fi05                  69        23
-=== RU-Balancer ===
-LOCATION              RAW (ms)  xHTTP (ms)
-ru17                  9         3
-ru18                  11        4
-=== YT-Balancer ===
-LOCATION              RAW (ms)  xHTTP (ms)
-al02                  134       44
-al06                  136       45
-al07                  137       47
-```
+## Как работает
 
-### Статусы здоровья
+1. Конфиг снимается командой `docker exec remnanode cli --dump-config`.
+2. Метрики читаются с хоста: `nsenter` в сеть контейнера и `curl http://127.0.0.1:11111/debug/vars`.
+3. Кандидаты балансировщика — аутбаунды, чей тег начинается с одного из `selector`.
+4. Логи Xray не читаются.
 
-- **CLEAN** 🟢 — все ноды работают
-- **FAIL** 🟡 — часть нод упала
-- **DEAD** 🔴 — все ноды недоступны
-
-## 🔍 Как работает
-
-### Логика prefix-matching
-
-Скрипт использует **строгое совпадение по префиксу** для выбора нод:
-
-```
-Selector: "EU-,US-"
-Ищет ноды начинающиеся с: ^EU- или ^US-
-
-✓ EU-node-1       (соответствует ^EU-)
-✓ US-east-01      (соответствует ^US-)
-✗ EU-US-hybrid    (не берется! требуется ровно EU- или ровно US-)
-✗ 1de              (не берется! не начинается с префикса)
-```
-
-### Сбор данных
-
-1. **Извлечение API credentials** — из процесса `rw-core` в контейнере
-2. **Загрузка конфига** — через Unix-сокет (без временных файлов)
-3. **Анализ логов** — поиск ошибок ping после последнего рестарта
-4. **Outbound метрики** — запрос к `/debug/vars` (порт 11111) внутри контейнера
-5. **Парсинг результатов** — jq для структурированного разбора JSON
-
-### Группировка outbound метрик
-
-Группировка аутбандов по балансировщикам выполняется динамически на основе селекторов из конфига (`MAP`). Для каждого аутбанда из `observatory` определяется его балансировщик через префикс-матчинг по селекторам, указанным в конфигурации балансировщиков. Это гарантирует, что группировка всегда соответствует актуальной конфигурации, а не хардкодным правилам.
-
-## 🛡️ Особенности Production
-
-- ✅ **Без временных файлов** — конфиг хранится только в переменных
-- ✅ **Проверки безопасности** — Docker и контейнер должны существовать
-- ✅ **One-liner ready** — корректная обработка потоков для `curl | bash`
-- ✅ **Prefix-only mode** — 1de не «залетит» в EU-Balancer
-- ✅ **Outbound метрики** — задержки RAW и xHTTP протоколов по каждому аутбанду
-- ✅ **Динамическая группировка** — селекторы берутся из конфига, не нужно хардкодить правила
-- ✅ **Структурированный вывод** — легко парсить в мониторинговые системы
-
-## 📝 Примеры использования
-
-### Проверка каждые 5 минут
-
-```bash
-*/5 * * * * curl -sSL https://raw.githubusercontent.com/raaad1on/balancer/main/balancer.sh | sudo bash >> /var/log/balancer-check.log 2>&1
-```
-
-### С логированием в файл
-
-```bash
-sudo bash balancer.sh | tee -a /var/log/balancer-status.log
-```
-
-### С отправкой в мониторинг (Prometheus/Grafana)
-
-Номер можно парсить и отправлять метрики:
-
-```bash
-HEALTH=$(curl -sSL ... | grep "UNSTABLE\|DEAD" | wc -l)
-```
-
-## 🐛 Troubleshooting
+## Troubleshooting
 
 | Ошибка | Решение |
 |--------|---------|
-| `Error: docker is not installed` | `apt install docker.io -y` |
-| `Error: Container remnanode is not running` | Проверить: `docker ps` |
-| `Error: Could not extract API credentials` | Проверить процесс: `docker exec remnanode ps aux \| grep rw-core` |
-| `Error: API request failed` | Проверить логи контейнера: `docker logs remnanode` |
-| `Observatory метрики недоступны` | Проверить что `/debug/vars` отвечает на порту 11111 внутри контейнера |
+| `python3 is required` | Поставить python3 |
+| `container remnanode is not running` | `docker ps` |
+| `cli --dump-config failed` | `docker logs remnanode` |
+| `/debug/vars request failed` | Проверить, что порт 11111 отвечает внутри контейнера |
+| Экран сразу печатает один кадр и выходит | Запускать в TTY: `ssh -t`, не через пайп |
 
-## 🤝 Лицензия
+## Лицензия
 
 MIT
-
-## 📧 Feedback
-
-Найдешь баг или хочешь фичу? Создай Issue или PR в репозитории.
